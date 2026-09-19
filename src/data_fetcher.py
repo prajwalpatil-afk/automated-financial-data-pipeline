@@ -4,7 +4,7 @@ Extracts company profiles, normalized multi-year financial statements,
 and historical OHLCV data into structured dictionaries.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 from typing import Any, Dict, List, Optional
 import pandas as pd
@@ -31,46 +31,41 @@ class TickerNotFoundError(DataExtractionError):
     pass
 
 
-# Map raw yfinance line item variations to canonical snake_case identifiers
-LINE_ITEM_MAPPING = {
-    # Income statement variations
-    "Total Revenue": "total_revenue",
-    "Operating Revenue": "total_revenue",
-    "Revenue": "total_revenue",
-    "Operating Income": "operating_income",
-    "Operating Expense": "operating_expense",
-    "Net Income": "net_income",
-    "Net Income Common Stockholders": "net_income",
-    "EBIT": "ebit",
-    "Interest Expense": "interest_expense",
-    "Tax Provision": "tax_provision",
-
-    # Balance sheet variations
-    "Total Assets": "total_assets",
-    "Total Liabilities Net Minority Interest": "total_liabilities",
-    "Total Liabilities": "total_liabilities",
-    "Cash And Cash Equivalents": "cash_and_cash_equivalents",
-    "Cash Cash Equivalents And Short Term Investments": "cash_and_cash_equivalents",
-    "Total Debt": "total_debt",
-    "Long Term Debt": "long_term_debt",
-    "Current Debt": "current_debt",
-    "Stockholders Equity": "stockholders_equity",
-    "Common Stock Equity": "stockholders_equity",
-
-    # Cash flow statement variations
-    "Operating Cash Flow": "operating_cash_flow",
-    "Cash Flow From Continuing Operating Activities": "operating_cash_flow",
-    "Capital Expenditure": "capital_expenditure",
-    "Free Cash Flow": "free_cash_flow",
-    "Investing Cash Flow": "investing_cash_flow",
-    "Financing Cash Flow": "financing_cash_flow",
+# Map canonical line item identifiers to prioritized raw yfinance line item variations
+PREFERRED_LINE_ITEMS: Dict[str, Dict[str, List[str]]] = {
+    "income": {
+        "total_revenue": ["Total Revenue", "Operating Revenue", "Revenue"],
+        "operating_income": ["Operating Income"],
+        "operating_expense": ["Operating Expense"],
+        "net_income": ["Net Income", "Net Income Common Stockholders"],
+        "ebit": ["EBIT"],
+        "interest_expense": ["Interest Expense"],
+        "tax_provision": ["Tax Provision"],
+    },
+    "balance": {
+        "total_assets": ["Total Assets"],
+        "total_liabilities": ["Total Liabilities Net Minority Interest", "Total Liabilities"],
+        "cash_and_cash_equivalents": ["Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments"],
+        "total_debt": ["Total Debt"],
+        "long_term_debt": ["Long Term Debt"],
+        "current_debt": ["Current Debt"],
+        "stockholders_equity": ["Stockholders Equity", "Common Stock Equity"],
+    },
+    "cashflow": {
+        "operating_cash_flow": ["Operating Cash Flow", "Cash Flow From Continuing Operating Activities"],
+        "capital_expenditure": ["Capital Expenditure"],
+        "free_cash_flow": ["Free Cash Flow"],
+        "investing_cash_flow": ["Investing Cash Flow"],
+        "financing_cash_flow": ["Financing Cash Flow"],
+    },
 }
 
-
-def _normalize_line_item(raw_name: str) -> Optional[str]:
-    """Map a raw statement line item to its standardized name."""
-    cleaned = str(raw_name).strip()
-    return LINE_ITEM_MAPPING.get(cleaned)
+# Anchor line items required for a period to be considered a complete statement column
+ANCHOR_LINE_ITEMS = {
+    "income": "total_revenue",
+    "balance": "total_assets",
+    "cashflow": "operating_cash_flow",
+}
 
 
 def fetch_company_profile(ticker: str) -> Dict[str, Any]:
@@ -134,37 +129,51 @@ def _extract_statement_records(
 ) -> List[Dict[str, Any]]:
     """Convert a yfinance financial statement DataFrame into normalized flat records.
 
-    yfinance statement DataFrames have line items as index and period dates as columns.
+    Applies prioritized line item matching to prevent duplicate line items per period,
+    and discards incomplete trailing columns lacking the anchor line item.
     """
     records: List[Dict[str, Any]] = []
     if df is None or df.empty:
         logger.warning("No %s statement available for %s", statement_type, ticker)
         return records
 
-    fetched_at = datetime.utcnow().isoformat()
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    mapping = PREFERRED_LINE_ITEMS.get(statement_type, {})
+    anchor_item = ANCHOR_LINE_ITEMS.get(statement_type)
 
     # Iterate through periods (columns)
     for period_col in df.columns:
-        # Normalize period date string (e.g. '2024-09-28')
         if hasattr(period_col, "strftime"):
             period_str = period_col.strftime("%Y-%m-%d")
         else:
             period_str = str(period_col).split(" ")[0]
 
-        # Iterate through line items (rows)
-        for raw_item, val in df[period_col].items():
-            if pd.isna(val):
-                continue
+        period_values: Dict[str, float] = {}
+        for canonical_name, candidate_raw_names in mapping.items():
+            for raw_name in candidate_raw_names:
+                if raw_name in df.index and pd.notna(df.loc[raw_name, period_col]):
+                    period_values[canonical_name] = float(df.loc[raw_name, period_col])
+                    break  # Take only the top-priority match for this canonical item
 
-            canonical_item = _normalize_line_item(str(raw_item))
-            if canonical_item:
-                records.append({
-                    "statement_type": statement_type,
-                    "period": period_str,
-                    "line_item": canonical_item,
-                    "value": float(val),
-                    "fetched_at": fetched_at,
-                })
+        # Skip incomplete trailing periods that lack the statement anchor item
+        if anchor_item and anchor_item not in period_values:
+            logger.debug(
+                "Skipping incomplete %s period %s for %s (missing %s)",
+                statement_type,
+                period_str,
+                ticker,
+                anchor_item,
+            )
+            continue
+
+        for canonical_name, val in period_values.items():
+            records.append({
+                "statement_type": statement_type,
+                "period": period_str,
+                "line_item": canonical_name,
+                "value": val,
+                "fetched_at": fetched_at,
+            })
 
     return records
 
@@ -238,7 +247,7 @@ def fetch_market_data(
         yf_ticker = yf.Ticker(ticker_clean)
 
         if trailing_days is not None and trailing_days > 0:
-            end_dt = datetime.utcnow()
+            end_dt = datetime.now(timezone.utc)
             start_dt = end_dt - timedelta(days=trailing_days)
             hist = yf_ticker.history(start=start_dt.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"))
         else:
@@ -247,7 +256,7 @@ def fetch_market_data(
         if hist is None or hist.empty:
             raise TickerNotFoundError(f"No market data returned for '{ticker_clean}'.")
 
-        fetched_at = datetime.utcnow().isoformat()
+        fetched_at = datetime.now(timezone.utc).isoformat()
         records: List[Dict[str, Any]] = []
 
         for idx, row in hist.iterrows():

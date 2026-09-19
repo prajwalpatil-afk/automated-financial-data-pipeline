@@ -150,9 +150,13 @@ def extract_dcf_baseline(df: pd.DataFrame) -> Dict[str, Any]:
     op_margin_series = margins["operating_margin"].dropna()
     avg_op_margin = float(op_margin_series.mean()) if not op_margin_series.empty else 0.15
 
-    # FCF
+    # FCF & conversion ratio
     fcf_df = compute_free_cash_flow(df_sorted)
     latest_fcf = float(fcf_df["free_cash_flow"].dropna().iloc[-1]) if not fcf_df["free_cash_flow"].dropna().empty else 0.0
+    conversion_series = fcf_df["fcf_conversion"].replace([np.inf, -np.inf], np.nan).dropna()
+    avg_fcf_conversion = float(conversion_series.mean()) if not conversion_series.empty and not pd.isna(conversion_series.mean()) else 1.0
+    if avg_fcf_conversion <= 0:
+        avg_fcf_conversion = 1.0
 
     # Balance sheet items for Enterprise Value -> Equity Value bridge
     latest_cash = float(df_sorted["cash_and_cash_equivalents"].dropna().iloc[-1]) if "cash_and_cash_equivalents" in df_sorted.columns and not df_sorted["cash_and_cash_equivalents"].dropna().empty else 0.0
@@ -171,6 +175,7 @@ def extract_dcf_baseline(df: pd.DataFrame) -> Dict[str, Any]:
         "baseline_growth_rate": baseline_growth,
         "avg_operating_margin": avg_op_margin,
         "latest_fcf": latest_fcf,
+        "avg_fcf_conversion_ratio": avg_fcf_conversion,
         "latest_cash": latest_cash,
         "latest_debt": latest_debt,
         "effective_tax_rate": tax_rate,

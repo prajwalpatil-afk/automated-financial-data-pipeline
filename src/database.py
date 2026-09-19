@@ -4,7 +4,7 @@ Implements raw sqlite3 schema management, idempotent upserts,
 dataset-specific freshness checks, and analytical query helpers.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 from pathlib import Path
 import sqlite3
@@ -152,7 +152,7 @@ def upsert_financial_statements(
             r["period"],
             r["line_item"],
             r.get("value"),
-            r.get("fetched_at", datetime.utcnow().isoformat()),
+            r.get("fetched_at", datetime.now(timezone.utc).isoformat()),
         )
         for r in records
     ]
@@ -196,7 +196,7 @@ def upsert_market_data(
             r.get("low"),
             r.get("close"),
             r.get("volume"),
-            r.get("fetched_at", datetime.utcnow().isoformat()),
+            r.get("fetched_at", datetime.now(timezone.utc).isoformat()),
         )
         for r in records
     ]
@@ -264,7 +264,12 @@ def is_fundamentals_fresh(
 
     try:
         latest_fetch = datetime.fromisoformat(row[0])
-        age = datetime.utcnow() - latest_fetch
+        # Ensure timezone-aware comparison if ISO string contains timezone, else compare timestamps
+        if latest_fetch.tzinfo is not None:
+            now_dt = datetime.now(timezone.utc)
+        else:
+            now_dt = datetime.utcnow()
+        age = now_dt - latest_fetch
         return age.total_seconds() < (max_age_days * 86400)
     except (ValueError, TypeError):
         return False

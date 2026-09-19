@@ -89,6 +89,7 @@ def test_extract_dcf_baseline(sample_financials_df):
     assert baseline["latest_fcf"] == 29000.0
     assert baseline["latest_cash"] == 40000.0
     assert baseline["latest_debt"] == 50000.0
+    assert pytest.approx(baseline["avg_fcf_conversion_ratio"], 0.001) == 1.1025
     # Effective tax = 6500 / 34500 ≈ 0.1884
     assert pytest.approx(baseline["effective_tax_rate"], 0.001) == 0.1884
 
